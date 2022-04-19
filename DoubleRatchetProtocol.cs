@@ -9,9 +9,10 @@ using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Crypto.Macs;
 using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Math;
 using Org.BouncyCastle.Security;
 
-namespace DoubleRatchet
+namespace TripleRatchet
 {
     public class DoubleRatchetProtocol
     {
@@ -26,7 +27,13 @@ namespace DoubleRatchet
                 curve.GetSeed());
 
 
-        public AsymmetricCipherKeyPair SendingEphemeralKey { get; set; }
+        public AsymmetricCipherKeyPair? SendingEphemeralKey { get; set; }
+
+        public Dictionary<int, VerifiableSecretShare>? SendingEphemeralRoomKey
+        {
+            get;
+            set;
+        }
 
         public ECPublicKeyParameters? ReceivingEphemeralPublicKey { get; set; }
 
@@ -34,7 +41,7 @@ namespace DoubleRatchet
 
         private byte[] rootKey;
 
-        private byte[] sendingChainKey;
+        private byte[]? sendingChainKey;
 
         private byte[]? receivingChainKey;
 
@@ -43,6 +50,8 @@ namespace DoubleRatchet
         private int receivedN;
 
         private List<byte[]> receivingMessageKeys = new List<byte[]>();
+
+        private bool isRoom;
 
         private string applicationName;
 
@@ -104,9 +113,40 @@ namespace DoubleRatchet
             var alicePoint = ecParam.Curve.DecodePoint(aliceEphemeralKey);
             var aliceEphemeralPubKey =
                 new ECPublicKeyParameters(alicePoint, ecParam);
-            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(aliceEphemeralPubKey.Q.GetEncoded()));
+
             this.ReceivingEphemeralPublicKey = aliceEphemeralPubKey;
-            
+        }
+
+        public DoubleRatchetProtocol(
+            string applicationName,
+            Dictionary<int, VerifiableSecretShare> roomSignedIdentityKey,
+            Dictionary<int, VerifiableSecretShare> roomSignedPreKey,
+            byte[] aliceSignedIdentityKey,
+            byte[] aliceEphemeralKey)
+        {
+            this.applicationName = applicationName;
+            var dh1 = this.CalculateDHKeyAgreement(
+                roomSignedPreKey,
+                aliceSignedIdentityKey);
+            var dh2 = this.CalculateDHKeyAgreement(
+                roomSignedIdentityKey,
+                aliceEphemeralKey);
+            var dh3 = this.CalculateDHKeyAgreement(
+                roomSignedPreKey,
+                aliceEphemeralKey);
+            var payload = DeriveRootKey(
+                new byte[0],
+                dh1.Concat(dh2).Concat(dh3).ToArray(),
+                64);
+            this.rootKey = payload.Take(32).ToArray();
+            this.receivingChainKey = payload.Skip(32).ToArray();
+
+            var alicePoint = ecParam.Curve.DecodePoint(aliceEphemeralKey);
+            var aliceEphemeralPubKey =
+                new ECPublicKeyParameters(alicePoint, ecParam);
+            this.isRoom = true;
+
+            this.ReceivingEphemeralPublicKey = aliceEphemeralPubKey;
         }
 
         public RatchetMessage RatchetEncrypt(byte[] plaintext)
@@ -114,29 +154,91 @@ namespace DoubleRatchet
             if (this.receivedN > 0 )
             {
                 Console.WriteLine("Ratcheting Send");
+                byte[] payload;
 
-                var ephemeralKey = GenerateDHKeyPair();
-                this.SendingEphemeralKey = ephemeralKey;
+                if (this.isRoom)
+                {
+                    this.SendingEphemeralRoomKey =
+                        new Dictionary<int, VerifiableSecretShare>();
+                    
+                    var reads = new Dictionary<int, Dictionary<int, byte[]>>();
+                    var writes = new Dictionary<int, Dictionary<int, byte[]>>();
+
+                    for (var i = 1; i <= 5; i++)
+                    {
+                        reads[i] = new Dictionary<int, byte[]>();
+                    }
+
+                    var serScalars = new Dictionary<int, BigInteger>();
+
+                    for (var i = 1; i <= 5; i++)
+                    { 
+                        serScalars[i] = ((ECPrivateKeyParameters)
+                            (DoubleRatchetProtocol.GenerateDHKeyPair()
+                                .Private)).D;
+                        this.SendingEphemeralRoomKey[i] =
+                            new VerifiableSecretShare(
+                                curve,
+                                curve.G,
+                                serScalars[i],
+                                3,
+                                5,
+                                i);
+                    }
+
+                    while (this.SendingEphemeralRoomKey[5].State !=
+                        VerifiableSecretShare.Round.Ready)
+                    {
+                        for (var i = 1; i <= 5; i++)
+                        {
+                            writes[i] =
+                                this.SendingEphemeralRoomKey[i].Next(reads[i]);
+                        }
+
+                        for (var i = 1; i <= 5; i++)
+                        {
+                            for (var j = 1; j <= 5; j++)
+                            {
+                                if (i != j && writes[j].Count > 0)
+                                {
+                                    reads[i][j] = writes[j][i];
+                                }
+                            }
+                        }
+                    }
+
+                    payload = this.DeriveRootKey(
+                        this.rootKey,
+                        this.CalculateDHKeyAgreement(
+                            this.SendingEphemeralRoomKey,
+                            this.ReceivingEphemeralPublicKey!.Q.GetEncoded()),
+                            64);
+                }
+                else
+                {
+                    var ephemeralKey = GenerateDHKeyPair();
+                    this.SendingEphemeralKey = ephemeralKey;
+                    payload = this.DeriveRootKey(
+                        this.rootKey,
+                        this.CalculateDHKeyAgreement(
+                            ephemeralKey,
+                            this.ReceivingEphemeralPublicKey!.Q.GetEncoded()),
+                        64);
+                }
                 this.sentN = 0;
-                var payload = DeriveRootKey(
-                    this.rootKey,
-                    this.CalculateDHKeyAgreement(
-                        ephemeralKey,
-                        this.ReceivingEphemeralPublicKey!.Q.GetEncoded()),
-                    64);
                 this.rootKey = payload.Take(32).ToArray();
                 this.sendingChainKey = payload.Skip(32).ToArray();
             }
 
             var messageEncryptionKey = this.DeriveChainKey(
                 ChainKey.MessageKey,
-                this.sendingChainKey);
+                this.sendingChainKey!);
             var aeadValue = this.DeriveChainKey(
                 ChainKey.AEADValue,
                 messageEncryptionKey);
             this.sendingChainKey = this.DeriveChainKey(
                 ChainKey.ChainKey,
-                this.sendingChainKey);
+                this.sendingChainKey!);
             var ciphertext = this.EncryptAESGCM(
                 messageEncryptionKey,
                 plaintext,
@@ -145,9 +247,16 @@ namespace DoubleRatchet
 
             if (this.sentN == 0)
             {
-                ephemeralPublicKey = ((ECPublicKeyParameters)
-                    (this.SendingEphemeralKey.Public)).Q.GetEncoded();
-                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(ephemeralPublicKey));
+                if (this.isRoom)
+                {
+                    ephemeralPublicKey = this.SendingEphemeralRoomKey![1]
+                        .PublicKey!.GetEncoded();
+                }
+                else
+                {
+                    ephemeralPublicKey = ((ECPublicKeyParameters)
+                        (this.SendingEphemeralKey!.Public)).Q.GetEncoded();
+                }
             }
 
             this.sentN++;
@@ -164,14 +273,28 @@ namespace DoubleRatchet
                 if (!this.ReceivingEphemeralPublicKey?.Q.Equals(point) ?? true)
                 {
                     Console.WriteLine("Ratcheting Receive");
+                    byte[] payload;
                     this.ReceivingEphemeralPublicKey =
                         new ECPublicKeyParameters(point, ecParam);
-                    var payload = DeriveRootKey(
-                        this.rootKey,
-                        this.CalculateDHKeyAgreement(
-                            this.SendingEphemeralKey,
-                            message.ephemeralPublicKey),
-                        64);
+                    
+                    if (this.isRoom)
+                    {
+                        payload = this.DeriveRootKey(
+                            this.rootKey,
+                            this.CalculateDHKeyAgreement(
+                                this.SendingEphemeralRoomKey!,
+                                message.ephemeralPublicKey),
+                            64);
+                    }
+                    else
+                    {
+                        payload = this.DeriveRootKey(
+                            this.rootKey,
+                            this.CalculateDHKeyAgreement(
+                                this.SendingEphemeralKey!,
+                                message.ephemeralPublicKey),
+                            64);
+                    }
                     this.rootKey = payload.Take(32).ToArray();
                     this.receivingChainKey = payload.Skip(32).ToArray();
                     this.receivedN = 0;
@@ -189,7 +312,9 @@ namespace DoubleRatchet
 
             try
             {
-                var plaintext = this.DecryptAESGCM(messageDecryptionKey, message.ciphertext);
+                var plaintext = this.DecryptAESGCM(
+                    messageDecryptionKey,
+                    message.ciphertext);
                 this.receivingMessageKeys.Remove(messageDecryptionKey);
                 this.receivedN++;
                 return plaintext;
@@ -220,6 +345,53 @@ namespace DoubleRatchet
             var secret = agreement.CalculateAgreement(ecPubKey);
 
             return secret.ToByteArrayUnsigned();
+        }
+
+        internal byte[] CalculateDHKeyAgreement(
+            Dictionary<int, VerifiableSecretShare> vssBase,
+            byte[] publicKey)
+        {
+            var point = ecParam.Curve.DecodePoint(publicKey);
+            var ecPubKey = new ECPublicKeyParameters(point, ecParam);
+
+            var reads = new Dictionary<int, Dictionary<int, byte[]>>();
+            var writes = new Dictionary<int, Dictionary<int, byte[]>>();
+            var vss = new Dictionary<int, VerifiableSecretShare>();
+
+            for (var i = 1; i <= 5; i++)
+            {
+                reads[i] = new Dictionary<int, byte[]>();
+                vss[i] = new VerifiableSecretShare(
+                    curve,
+                    point,
+                    vssBase[i].SecretScalar,
+                    3,
+                    5,
+                    i);
+            }
+
+
+            while (vss[5].State != VerifiableSecretShare.Round.Ready)
+            {
+                for (var i = 1; i <= 5; i++)
+                {
+                    writes[i] = vss[i].Next(reads[i]);
+                }
+
+                for (var i = 1; i <= 5; i++)
+                {
+                    for (var j = 1; j <= 5; j++)
+                    {
+                        if (i != j && writes[j].Count > 0)
+                        {
+                            reads[i][j] = writes[j][i];
+                        }
+                    }
+                }
+            }
+
+            return vss[1].PublicKey!.AffineXCoord.ToBigInteger()
+                .ToByteArrayUnsigned();
         }
 
         internal byte[] DeriveRootKey(byte[] salt, byte[] input, int length)

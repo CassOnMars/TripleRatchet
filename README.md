@@ -1,6 +1,6 @@
-# Wolfpack-Double-Ratchet
+# Wolfpack-Triple-Ratchet
 
-An example implementation of the Double-Ratchet algorithm. This is not hardened for production use -- this is for educational purposes only. The Quilibrium codebase will include a hardened version (among other cryptography). 
+An example implementation of the Triple-Ratchet algorithm, which extends the Double-Ratchet algorithm with a multiparty room context. This is not hardened for production use -- this is for educational purposes only. The Quilibrium codebase will include a hardened version (among other cryptography). 
 
 ## Differences from Signal's Double-Ratchet
 
