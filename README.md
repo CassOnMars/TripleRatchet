@@ -8,3 +8,4 @@ An example implementation of the Triple-Ratchet algorithm, which extends the Dou
 - All keys are P-256 to be easy to use with hardware and browser cryptography
 support
 - The hashing algorithm used is SHA-3
+- It supports multiple parties, not just a two-party context :)
